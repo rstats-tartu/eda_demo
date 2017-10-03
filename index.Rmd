@@ -1,0 +1,332 @@
+---
+title: "index"
+author: "Taavi Päll"
+date: "27 9 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(stringr)
+```
+
+
+## Download dataset
+```{r}
+url <- "https://raw.githubusercontent.com/rstats-tartu/datasets/master/cancer_newcases_PK10.json"
+dir.create("data")
+download.file(url, "data/incidence.json")
+```
+
+Install boulder library to import json.
+```{r}
+# install.packages("devtools")
+# devtools::install_github("tpall/boulder")
+```
+
+## Import dataset
+```{r}
+library(boulder)
+incidence <- json_to_df("data/incidence.json")
+```
+
+Load tidyverse libraries:
+```{r}
+library(tidyverse)
+library(stringi)
+library(stringr) # this is what you are going to need most in future
+```
+
+
+For better overview lets filter out "Specified site" values that are longer than 30 characters.
+```{r}
+filter(incidence, str_length(`Specified site`) < 30)
+```
+
+Convert Year to numeric
+```{r}
+incidence <- incidence %>% mutate_at("Year", parse_number)
+```
+
+Specified site and sex to characters
+```{r}
+?mutate_at
+incidence <- incidence %>% mutate_at(c("Specified site","Sex"), parse_character)
+incidence
+```
+
+
+```{r}
+label <- unique(incidence$label)
+data_source <- unique(incidence$source)
+updated <- unique(incidence$updated)
+label
+data_source
+updated
+```
+
+```{r}
+incidence <- incidence %>% 
+  mutate(Site = stri_trim_left(`Specified site`, "[[:alpha:]]")) %>% 
+  select(Year, Site, Sex, everything(), -`Specified site`, -label, -source, -updated)
+```
+
+```{r}
+incidence
+```
+
+It's not what we want...
+```{r}
+gather(incidence)
+```
+
+Convert incidence from wide to long: 
+```{r}
+incidence_long <- gather(incidence, key = age, value = cases, matches("[[:digit:]]"))
+# gather(incidence, key = age, value = cases, -Year, -Sex, -Site)
+incidence_long
+```
+
+Let's filter out NA-s.
+```{r}
+incidence_long <- drop_na(incidence_long)
+```
+
+That's all with data wrangling for now!
+
+## Cancer trend in Estonia
+
+Plot number of all cancer cases (Men + Women) per Year:
+```{r}
+total_cases_per_year <- incidence_long %>% 
+  filter(Site == "All malignant neoplasms (C00-C97)") %>% 
+  group_by(Year) %>% 
+  summarise(total_cases = sum(cases))
+total_cases_per_year
+```
+
+```{r}
+p <- total_cases_per_year %>% 
+  ggplot(aes(Year, total_cases)) +
+  geom_point() +
+  geom_line() +
+  ylab(label) +
+  ggtitle("All malignant neoplasms (C00-C97)",
+          subtitle = paste("Source:", data_source)) +
+  expand_limits(y = 0) +
+  geom_smooth(method = "lm", se = FALSE)
+p
+```
+Ok, trend is increasing, but how much?
+
+Percent increase of cancer cases from 2000 to 2014? 
+```{r}
+range(total_cases_per_year$total_cases)
+```
+
+Please compare number of cases in male and females:
+```{r}
+total_cases_per_year_sex <- incidence_long %>% 
+  filter(Site == "All malignant neoplasms (C00-C97)") %>% 
+  group_by(Year, Sex) %>% 
+  summarise(total_cases = sum(cases))
+```
+
+here we replace data and aes in previous plot called "p":
+```{r}
+p %+% total_cases_per_year_sex + aes(Year, total_cases, color = Sex)
+```
+
+Perhaps we want to completely rewrite our plot and throw out linear model lines and expand limits option:
+```{r}
+total_cases_per_year_sex %>% 
+  ggplot(aes(Year, total_cases, color = Sex)) +
+  geom_point() +
+  geom_line() +
+  ylab(label) +
+  ggtitle("All malignant neoplasms (C00-C97)",
+          subtitle = paste("Source:", data_source))
+```
+
+Lets get population size data for year, sex and per age:
+
+```{r}
+download.file("https://raw.githubusercontent.com/rstats-tartu/datasets/master/mean_annual_population.csv",
+              "data/mean_annual_population.csv")
+```
+
+Import population dataset into R:
+```{r}
+pop <- read_csv("data/mean_annual_population.csv")
+pop
+```
+
+Add age groups 0 and 1-4 into age group 0-4:
+```{r}
+pop_long <- pop %>% mutate("0-4" = `0` + `1-4`) %>% 
+  select(Sex, Year, `0-4`, everything()) %>% 
+  select(-`0`, -`1-4`) %>% 
+  gather("age", "ave_pop", matches("[0-9]"))
+pop_long
+```
+
+
+```{r}
+incidence_long <- left_join(incidence_long, pop_long)
+```
+
+Cancer incidence is give new cases per 100'000.
+```{r}
+incidence_year_sex <- incidence_long %>% 
+  group_by(Site, Year, Sex) %>% 
+  summarise(cases = sum(cases),
+            ave_pop = sum(ave_pop)) %>% 
+  mutate(incidence = cases*100000 / ave_pop)
+incidence_year_sex
+```
+
+
+```{r}
+incidence_year_sex %>% filter(Site == "All malignant neoplasms (C00-C97)")
+```
+
+
+```{r}
+incidence_year_sex %>% 
+  filter(Site == "All malignant neoplasms (C00-C97)") %>% 
+  ggplot(aes(Year, incidence, color = Sex)) +
+  geom_point() +
+  geom_line() +
+  ylab("Cancer incidence per 100'000") +
+  ggtitle("All malignant neoplasms (C00-C97)",
+          subtitle = paste("Source:", data_source))
+```
+
+## What are the most frequent cancer sites
+
+We have 73 cancer sites in our dataset:
+```{r}
+incidence_year_sex$Site %>% unique() %>% length()
+```
+
+## What are the most frequent cancer sites?
+
+Let's have a look at Top10 most frequent cancers.
+Most frequent cancers are different in men and women.
+
+First, we try to remove some summary variables from table.
+"boulder" package has *adhoc* function `icd_sums()` that tries to id rows that contain summary data over many cancer sites using ICD codes in "Sites" strings.
+```{r}
+## boulder has adhoc function that tries to id parent Sites
+parent_nodes <- boulder::icd_sums(unique(incidence_long$Site))
+parent_nodes
+```
+
+Create vector for subsetting:
+```{r}
+unique_parents <- unique(parent_nodes$Parent)
+```
+
+> This can be also achieved by "manually" specifying Site values to be omitted.
+
+## Find most frequent cancer sites
+We calculate incidence for each Site per Sex, let's drop Year by taking its average:
+```{r}
+incidence_sex_filt <- incidence_year_sex %>% 
+  filter(!Site %in% unique_parents) %>% 
+  group_by(Site, Sex) %>% 
+  summarise(incidence = mean(incidence))
+```
+
+List of top10 cancers by Sex:
+```{r}
+## list of top10 cancers
+listof_top10 <- incidence_sex_filt %>% 
+  group_by(Sex) %>% 
+  top_n(10, incidence) %>% 
+  arrange(desc(incidence))
+listof_top10
+```
+
+Plot most frequent cancers:
+```{r}
+incidence_sex_filt %>% 
+  filter(Site %in% listof_top10$Site) %>% 
+  ggplot(aes(Sex, incidence)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ Site, labeller = label_wrap_gen()) +
+  labs(title = "Top10 cancer sites from both genders",
+       subtitle = "Mean annual incidence from years 2000 to 2014",
+       y = "Cancer incidence per 100000",
+       caption = paste("Source:", data_source)) +
+  theme(axis.title.x = element_blank())
+```
+
+Here is another take using the same data:
+```{r}
+incidence_sex_filt %>%
+  filter(Site %in% listof_top10$Site) %>% 
+  ggplot(aes(reorder(Site, incidence), incidence, fill = Sex)) +
+  geom_bar(stat = "identity") +
+  labs(y = "Cancer incidence per 100000",
+       title = "Top10 cancer sites from both genders",
+       subtitle = "Mean annual incidence from years 2000 to 2014",
+       caption = paste("Data:", data_source)) +
+  coord_flip() +
+  theme(axis.title.y = element_blank(),
+        legend.title = element_blank()) +
+  scale_fill_manual(values = c("darkgray", "orange"))
+```
+
+What these two graphs tell us?
+
+
+## Age groups
+
+First convert age groups to numerics:
+```{r}
+incidence_long <- mutate_at(incidence_long, "age", ~ parse_number(str_extract(.x, "^[0-9]{1,2}")))
+```
+
+
+
+```{r}
+library(viridis)
+incidence_long %>% 
+  filter(Site %in% listof_top10$Site) %>%
+  mutate(incidence = cases/(ave_pop/1E5)) %>% 
+  group_by(Sex, Site, age) %>% 
+  summarise(incidence = mean(incidence)) %>% 
+  ggplot(aes(age, incidence, color = Sex)) +
+  geom_line() +
+  facet_wrap(~ Site, labeller = label_wrap_gen(), scales = "free_y") +
+  scale_color_viridis(discrete = T)
+```
+
+
+Let's do the above graph using weighted incidence values.
+```{r}
+## calculate incidence
+incidence_weighted_sex_age <- incidence_long %>%
+  mutate(incidence = cases / ave_pop) %>% 
+  group_by(Site, Sex, age) %>% 
+  mutate(wgts = ave_pop/sum(ave_pop)) %>% 
+  mutate(incidence_wgt = incidence * wgts) %>% 
+  summarise(incidence_wgt = sum(incidence_wgt))
+```
+
+```{r}
+## plot age group weighted incidence values
+incidence_weighted_sex_age %>% 
+  filter(Site %in% listof_top10$Site) %>%
+  ggplot(aes(age, incidence_wgt, color = Sex)) +
+  geom_line() +
+  facet_wrap(~ Site, labeller = label_wrap_gen(), scales = "free_y") +
+  scale_color_viridis(discrete = T)
+```
+
+
